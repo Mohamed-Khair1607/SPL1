@@ -1,0 +1,59 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int femtoshell_main(int argc, char *argv[]) {
+    char buffer[1024];
+    const char *prompt = ">> "; // Custom prompt
+
+    while (1) {
+        printf("%s", prompt);
+        fflush(stdout);
+
+        if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
+            if (feof(stdin)) {
+                printf("\nGood Bye :)\n");
+            } else {
+                perror("fgets error");
+            }
+            return 0;
+        }
+
+        // Remove trailing newline
+        buffer[strcspn(buffer, "\n")] = '\0';
+
+        char *line = buffer;
+        // Skip leading whitespace
+        line += strspn(line, " \t");
+
+        if (line == '\0') {
+             continue; // Skip empty lines
+          }
+
+        char cmd[256];
+        if (sscanf(line, "%255s", cmd) != 1) {
+            continue; // No command found
+        }
+
+        // Move past the command and any following whitespace
+        line += strcspn(line, " \t");
+        line += strspn(line, " \t");
+
+        if (strcmp(cmd, "echo") == 0) {
+            printf("%s\n", line);
+        } else if (strcmp(cmd, "exit") == 0) {
+            // Check for additional arguments
+            line += strspn(line, " \t");
+            if (*line == '\0') {
+                printf("Good Bye :)\n");
+                return 0;
+            } else {
+                printf("Invalid command\n");
+            }
+        } else {
+            printf("Invalid command\n");
+        }
+    }
+
+    return 0; // Unreachable
+}
