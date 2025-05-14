@@ -1,0 +1,304 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <ctype.h>
+#include <stdbool.h>
+
+typedef struct Variable {
+    char *key;
+    char *value;
+    struct Variable *next;
+} Variable;
+
+static Variable *variables = NULL;
+
+static Variable *find_variable(const char *key) {
+    Variable *current = variables;
+    while (current) {
+        if (strcmp(current->key, key) == 0) return current;
+        current = current->next;
+    }
+    return NULL;
+}
+
+static void free_variables() {
+    Variable *current = variables;
+    while (current) {
+        Variable *next = current->next;
+        free(current->key);
+        free(current->value);
+        free(current);
+        current = next;
+    }
+    variables = NULL;
+}
+
+static char *substitute_vars(const char *input) {
+    if (!input) return NULL;
+
+    size_t buf_size = strlen(input) * 2 + 1;
+    char *buffer = (char *)malloc(buf_size);
+    if (!buffer) return NULL;
+
+    size_t pos = 0;
+    const char *src = input;
+
+    while (*src) {
+        if (*src == '$' && (isalpha((unsigned char)src[1]) || src[1] == '_')) {
+            src++;
+            const char *var_start = src;
+            while (isalnum((unsigned char)*src) || *src == '_') src++;
+            size_t var_len = src - var_start;
+
+            char var_name[var_len + 1];
+            strncpy(var_name, var_start, var_len);
+            var_name[var_len] = '\0';
+
+            Variable *var = find_variable(var_name);
+            if (var) {
+                size_t val_len = strlen(var->value);
+                while (pos + val_len >= buf_size) {
+                    buf_size *= 2;
+                    char *new_buf = (char *)realloc(buffer, buf_size);
+                    if (!new_buf) {
+                        free(buffer);
+                        return NULL;
+                    }
+                    buffer = new_buf;
+                }
+                strcpy(buffer + pos, var->value);
+                pos += val_len;
+            }
+        } else {
+            if (pos + 1 >= buf_size) {
+                buf_size *= 2;
+                char *new_buf = (char *)realloc(buffer, buf_size);
+                if (!new_buf) {
+                    free(buffer);
+                    return NULL;
+                }
+                buffer = new_buf;
+            }
+            buffer[pos++] = *src++;
+        }
+    }
+    buffer[pos] = '\0';
+    return buffer;
+}
+
+static int handle_builtin(char **args, size_t arg_count) {
+    if (strcmp(args[0], "echo") == 0) {
+        for (size_t i = 1; i < arg_count; i++) {
+            printf("%s%c", args[i], i < arg_count - 1 ? ' ' : '\n');
+        }
+        return 0;
+    } else if (strcmp(args[0], "pwd") == 0) {
+        char *cwd = getcwd(NULL, 0);
+        if (cwd) {
+            printf("%s\n", cwd);
+            free(cwd);
+        } else {
+            perror("pwd");
+        }
+        return 0;
+    } else if (strcmp(args[0], "cd") == 0) {
+        char *dir = arg_count > 1 ? args[1] : getenv("HOME");
+        if (!dir) {
+            fprintf(stderr, "cd: HOME not set\n");
+            return 1;
+        }
+        if (chdir(dir) != 0) {
+            perror("cd");
+            return 1;
+        }
+        return 0;
+    } else if (strcmp(args[0], "export") == 0) {
+        if (arg_count != 2) {
+            fprintf(stderr, "export: invalid arguments\n");
+            return 1;
+        }
+        Variable *var = find_variable(args[1]);
+        if (!var) {
+            fprintf(stderr, "export: variable '%s' not found\n", args[1]);
+            return 1;
+        }
+        if (setenv(var->key, var->value, 1) != 0) {
+            perror("export");
+            return 1;
+        }
+        return 0;
+    } else if (strcmp(args[0], "exit") == 0) {
+        printf("Good Bye :)\n");
+        free_variables();
+        exit(0);
+    }
+    return -1; // Not a built-in
+}
+
+int microshell_main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+
+    char buffer[4096];
+    const char *prompt = "Micro Shell Prompt > ";
+
+    while (1) {
+        printf("%s", prompt);
+        fflush(stdout);
+
+        if (!fgets(buffer, sizeof(buffer), stdin)) {
+            if (feof(stdin)) {
+                printf("\nGood Bye :)\n");
+                break;
+            }
+            perror("fgets");
+            continue;
+        }
+
+        buffer[strcspn(buffer, "\n")] = '\0';
+        char *line = buffer;
+        while (*line == ' ' || *line == '\t') line++;
+        if (*line == '\0') continue;
+
+        // Split into tokens with variable substitution
+        char **args = NULL;
+        size_t arg_count = 0;
+        char *saveptr;
+        char *token = strtok_r(line, " \t", &saveptr);
+
+        while (token) {
+            char *sub = substitute_vars(token);
+            if (!sub) {
+                for (size_t i = 0; i < arg_count; i++) free(args[i]);
+                free(args);
+                arg_count = 0;
+                break;
+            }
+
+            char **new_args = (char **)realloc(args, (arg_count + 1) * sizeof(char *));
+            if (!new_args) {
+                free(sub);
+                for (size_t i = 0; i < arg_count; i++) free(args[i]);
+                free(args);
+                arg_count = 0;
+                break;
+            }
+            args = new_args;
+            args[arg_count++] = sub;
+            token = strtok_r(NULL, " \t", &saveptr);
+        }
+
+        if (arg_count == 0) continue;
+
+        // Handle built-in commands without redirection
+        int builtin_status = handle_builtin(args, arg_count);
+        if (builtin_status != -1) {
+            for (size_t i = 0; i < arg_count; i++) free(args[i]);
+            free(args);
+            if (builtin_status == 0) continue;
+            else break;
+        }
+
+        // Process redirections for external commands
+        char *input_file = NULL;
+        char *output_file = NULL;
+        char *error_file = NULL;
+        char **new_argv = NULL;
+        size_t new_argc = 0;
+        int status = 0;
+
+        for (size_t i = 0; i < arg_count;) {
+            if (strcmp(args[i], "<") == 0) {
+                if (i + 1 >= arg_count) {
+                    fprintf(stderr, "syntax error near '<'\n");
+                    status = 1;
+                    break;
+                }
+                input_file = args[i + 1];
+                i += 2;
+            } else if (strcmp(args[i], ">") == 0) {
+                if (i + 1 >= arg_count) {
+                    fprintf(stderr, "syntax error near '>'\n");
+                    status = 1;
+                    break;
+                }
+                output_file = args[i + 1];
+                i += 2;
+            } else if (strcmp(args[i], "2>") == 0) {
+                if (i + 1 >= arg_count) {
+                    fprintf(stderr, "syntax error near '2>'\n");
+                    status = 1;
+                    break;
+                }
+                error_file = args[i + 1];
+                i += 2;
+            } else {
+                new_argv = (char **)realloc(new_argv, (new_argc + 1) * sizeof(char *));
+                new_argv[new_argc++] = args[i];
+                i++;
+            }
+        }
+
+        if (status != 0 || new_argc == 0) {
+            fprintf(stderr, "invalid command\n");
+            for (size_t i = 0; i < arg_count; i++) free(args[i]);
+            free(args);
+            free(new_argv);
+            continue;
+        }
+
+        // Execute external command
+        pid_t pid = fork();
+        if (pid == -1) {
+            perror("fork");
+        } else if (pid == 0) {
+            // Child process
+            if (input_file) {
+                int fd = open(input_file, O_RDONLY);
+                if (fd == -1) {
+                    perror("open input");
+                    exit(EXIT_FAILURE);
+                }
+                dup2(fd, STDIN_FILENO);
+                close(fd);
+            }
+            if (output_file) {
+                int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd == -1) {
+                    perror("open output");
+                    exit(EXIT_FAILURE);
+                }
+                dup2(fd, STDOUT_FILENO);
+                close(fd);
+            }
+            if (error_file) {
+                int fd = open(error_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd == -1) {
+                    perror("open error");
+                    exit(EXIT_FAILURE);
+                }
+                dup2(fd, STDERR_FILENO);
+                close(fd);
+            }
+
+            execvp(new_argv[0], new_argv);
+            perror("execvp");
+            exit(EXIT_FAILURE);
+        } else {
+            // Parent process
+            int child_status;
+            waitpid(pid, &child_status, 0);
+        }
+
+        // Cleanup
+        for (size_t i = 0; i < arg_count; i++) free(args[i]);
+        free(args);
+        free(new_argv);
+    }
+
+    free_variables();
+    return 0;
+}
