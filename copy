@@ -1,0 +1,86 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+#define BUFFER_SIZE 4096
+
+int cp_main(int argc, char *argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s <source> <destination>\n", argv[0]);
+        return 1;
+    }
+
+    const char *src = argv[1];
+    const char *dest = argv[2];
+
+    int src_fd = open(src, O_RDONLY);
+    if (src_fd == -1) {
+        perror("cp: open source");
+        return 1;
+    }
+
+    struct stat stat_buf;
+    if (fstat(src_fd, &stat_buf) == -1) {
+        perror("cp: stat");
+        close(src_fd);
+        return 1;
+    }
+
+    int dest_fd = open(dest, O_WRONLY | O_CREAT | O_TRUNC, stat_buf.st_mode);
+    if (dest_fd == -1) {
+        perror("cp: open destination");
+        close(src_fd);
+        return 1;
+    }
+
+    char buffer[BUFFER_SIZE];
+    ssize_t bytes_read;
+    
+  
+    while ((bytes_read = read(src_fd, buffer, sizeof(buffer))) > 0) {
+        if (bytes_read == -1) {
+            perror("cp: read");
+            close(src_fd);
+            close(dest_fd);
+            return 1;
+        }
+
+        ssize_t bytes_written = write(dest_fd, buffer, bytes_read);
+        if (bytes_written == -1) {
+            perror("cp: write");
+            close(src_fd);
+            close(dest_fd);
+            return 1;
+        }
+
+        if (bytes_written != bytes_read) {
+            fprintf(stderr, "cp: partial write error\n");
+            close(src_fd);
+            close(dest_fd);
+            return 1;
+        }
+    }
+
+    
+    if (bytes_read == -1) {
+        perror("cp: read");
+        close(src_fd);
+        close(dest_fd);
+        return 1;
+    }
+
+    if (close(dest_fd) == -1) {
+        perror("cp: close destination");
+        close(src_fd);
+        return 1;
+    }
+
+    if (close(src_fd) == -1) {
+        perror("cp: close source");
+        return 1;
+    }
+
+    return 0;
+}
