@@ -1,0 +1,277 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <ctype.h>
+#include <errno.h>
+
+typedef struct Variable {
+    char *key;
+    char *value;
+    struct Variable *next;
+} Variable;
+
+static Variable *variables = NULL;
+
+// Helper function prototypes
+static void free_variables();
+static Variable *find_variable(const char *key);
+static int handle_assignment(char *line);
+static char *substitute_vars(const char *input);
+static int is_valid_var_name(const char *name);
+
+int nanoshell_main(int argc, char *argv[]) {
+    (void)argc;  // Suppress unused parameter warnings
+    (void)argv;
+
+    char buffer[4096];
+    const char *prompt = "Nano Shell Prompt > ";
+    int status = 0;
+
+    while (1) {
+        printf("%s", prompt);
+        fflush(stdout);
+
+        // Fixed fgets syntax
+        if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
+            if (feof(stdin)) {
+                printf("\nGood Bye :)\n");
+                break;
+            }
+            perror("fgets");
+            continue;
+        }
+
+        // Remove newline and trim whitespace
+        buffer[strcspn(buffer, "\n")] = '\0';
+        char *line = buffer;
+        while (*line == ' ' || *line == '\t') line++;
+        if (*line == '\0') continue;
+
+        // Handle variable assignment
+        if (handle_assignment(line) == 0) {
+            continue;
+        }
+
+        // Parse command line with variable substitution
+        char **args = NULL;
+        size_t arg_count = 0;
+        char *saveptr;
+        char *token = strtok_r(line, " \t", &saveptr);
+
+        while (token != NULL) {
+            char *substituted = substitute_vars(token);
+            if (!substituted) {
+                status = 1;
+                break;
+            }
+
+            // Add explicit cast
+            char **new_args = (char **)realloc(args, (arg_count + 1) * sizeof(char *));
+            if (!new_args) {
+                free(substituted);
+                status = 1;
+                break;
+            }
+
+            args = new_args;
+            args[arg_count++] = substituted;
+            token = strtok_r(NULL, " \t", &saveptr);
+        }
+
+        if (!args || arg_count == 0) {
+            free(args);
+            continue;
+        }
+
+        // Handle built-in commands
+        if (strcmp(args[0], "exit") == 0) {
+            printf("Good Bye :)\n");
+            free_variables();
+            for (size_t i = 0; i < arg_count; i++) free(args[i]);
+            free(args);
+            break;
+        }
+        else if (strcmp(args[0], "echo") == 0) {
+            for (size_t i = 1; i < arg_count; i++) {
+                printf("%s%c", args[i], i < arg_count - 1 ? ' ' : '\n');
+            }
+        }
+        else if (strcmp(args[0], "pwd") == 0) {
+            char *cwd = getcwd(NULL, 0);
+            if (cwd) {
+                printf("%s\n", cwd);
+                free(cwd);
+            } else {
+                perror("pwd");
+            }
+        }
+        else if (strcmp(args[0], "cd") == 0) {
+            char *dir = arg_count > 1 ? args[1] : getenv("HOME");
+            if (!dir || chdir(dir) != 0) {
+                perror("cd");
+            }
+        }
+        else if (strcmp(args[0], "export") == 0) {
+            if (arg_count != 2) {
+                printf("Invalid command\n");
+            } else {
+                Variable *var = find_variable(args[1]);
+                if (var) {
+                    if (setenv(var->key, var->value, 1) != 0) {
+                        perror("export");
+                    }
+                } else {
+                    printf("Variable '%s' not found\n", args[1]);
+                }
+            }
+        }
+        else {
+            // Execute external command
+            pid_t pid = fork();
+            if (pid == -1) {
+                perror("fork");
+            }
+            else if (pid == 0) {
+                execvp(args[0], args);
+                perror("execvp");
+                exit(EXIT_FAILURE);
+            }
+            else {
+                waitpid(pid, &status, 0);
+            }
+        }
+
+        // Cleanup
+        for (size_t i = 0; i < arg_count; i++) {
+            free(args[i]);
+        }
+        free(args);
+    }
+
+    return 0;
+}
+
+// Helper function implementations with fixes
+static void free_variables() {
+    Variable *current = variables;
+    while (current) {
+        Variable *next = current->next;
+        free(current->key);
+        free(current->value);
+        free(current);
+        current = next;
+    }
+    variables = NULL;
+}
+
+static Variable *find_variable(const char *key) {
+    Variable *current = variables;
+    while (current) {
+        if (strcmp(current->key, key) == 0) {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+static int handle_assignment(char *line) {
+    char *eq = strchr(line, '=');
+    if (!eq || eq == line) return -1;
+
+    // Check if valid assignment format
+    char *end = line + strlen(line);
+    for (char *p = line; p < end; p++) {
+        if (*p == ' ' || *p == '\t') return -1;
+    }
+
+    *eq = '\0';
+    char *key = line;
+    char *value = eq + 1;
+
+    if (!is_valid_var_name(key)) {
+        printf("Invalid command\n");
+        return 0;
+    }
+
+    Variable *existing = find_variable(key);
+    if (existing) {
+        free(existing->value);
+        existing->value = strdup(value);
+    } else {
+        // Add explicit cast
+        Variable *new_var = (Variable *)malloc(sizeof(Variable));
+        new_var->key = strdup(key);
+        new_var->value = strdup(value);
+        new_var->next = variables;
+        variables = new_var;
+    }
+    return 0;
+}
+
+static char *substitute_vars(const char *input) {
+    if (!input) return NULL;
+
+    size_t buf_size = strlen(input) * 2 + 1;
+    // Add explicit cast
+    char *buffer = (char *)malloc(buf_size);
+    if (!buffer) return NULL;
+
+    size_t pos = 0;
+    const char *src = input;
+
+    while (*src) {
+        if (*src == '$' && (isalpha((unsigned char)src[1]) || src[1] == '_')) {
+            src++;
+            const char *var_start = src;
+            while (isalnum((unsigned char)*src) || *src == '_') src++;
+            size_t var_len = src - var_start;
+
+            char var_name[var_len + 1];
+            strncpy(var_name, var_start, var_len);
+            var_name[var_len] = '\0';
+
+            Variable *var = find_variable(var_name);
+            if (var) {
+                size_t val_len = strlen(var->value);
+                while (pos + val_len >= buf_size) {
+                    buf_size *= 2;
+                    // Add explicit cast
+                    char *new_buf = (char *)realloc(buffer, buf_size);
+                    if (!new_buf) {
+                        free(buffer);
+                        return NULL;
+                    }
+                    buffer = new_buf;
+                }
+                strcpy(buffer + pos, var->value);
+                pos += val_len;
+            }
+        } else {
+            if (pos + 1 >= buf_size) {
+                buf_size *= 2;
+                // Add explicit cast
+                char *new_buf = (char *)realloc(buffer, buf_size);
+                if (!new_buf) {
+                    free(buffer);
+                    return NULL;
+                }
+                buffer = new_buf;
+            }
+            buffer[pos++] = *src++;
+        }
+    }
+    buffer[pos] = '\0';
+    return buffer;
+}
+
+static int is_valid_var_name(const char *name) {
+    if (!name || !*name) return 0;
+    if (!isalpha((unsigned char)*name) && *name != '_') return 0;
+    while (*++name) {
+        if (!isalnum((unsigned char)*name) && *name != '_') return 0;
+    }
+    return 1;
+}
