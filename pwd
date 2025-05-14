@@ -1,0 +1,16 @@
+//PWD 
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int pwd_main() {
+    char *cwd = getcwd(NULL, 0); // Let getcwd allocate buffer dynamically
+    if (cwd == NULL) {
+        perror("pwd");
+        return 1;
+    }
+    printf("%s\n", cwd);
+    free(cwd); // Free the allocated memory
+    return 0;
+}
